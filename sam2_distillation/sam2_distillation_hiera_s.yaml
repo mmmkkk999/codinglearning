@@ -1,0 +1,214 @@
+# @package _global_
+
+# Model
+model:
+  _target_: training.model.sam2_distillation.SAM2FeatureDistillationTrain
+  
+  # 学生模型配置
+  student_image_encoder:
+    _target_: sam2.modeling.backbones.image_encoder.ImageEncoder
+    scalp: 1
+    trunk:
+      _target_: sam2.modeling.backbones.hieradet.Hiera
+      embed_dim: 96
+      num_heads: 1
+      stages: [1, 2, 11, 2]
+      global_att_blocks: [7, 10, 13]
+      window_pos_embed_bkg_spatial_size: [7, 7]
+    neck:
+      _target_: sam2.modeling.backbones.image_encoder.FpnNeck
+      position_encoding:
+        _target_: sam2.modeling.position_encoding.PositionEmbeddingSine
+        num_pos_feats: 256
+        normalize: true
+        scale: null
+        temperature: 10000
+      d_model: 256
+      backbone_channel_list: [768, 384, 192, 96]
+      fpn_top_down_levels: [2, 3]
+      fpn_interp_model: nearest
+
+  # 教师模型配置（使用更大的模型）
+  teacher_image_encoder:
+    _target_: sam2.modeling.backbones.image_encoder.ImageEncoder
+    scalp: 1
+    trunk:
+      _target_: sam2.modeling.backbones.hieradet.Hiera
+      embed_dim: 144
+      num_heads: 2
+      stages: [2, 6, 36, 4]
+      global_att_blocks: [23, 33, 43]
+      window_pos_embed_bkg_spatial_size: [7, 7]
+      window_spec: [8, 4, 16, 8]
+    neck:
+      _target_: sam2.modeling.backbones.image_encoder.FpnNeck
+      position_encoding:
+        _target_: sam2.modeling.position_encoding.PositionEmbeddingSine
+        num_pos_feats: 256
+        normalize: true
+        scale: null
+        temperature: 10000
+      d_model: 256
+      backbone_channel_list: [1152, 576, 288, 144]
+      fpn_top_down_levels: [2, 3]
+      fpn_interp_model: nearest
+
+  # 蒸馏配置
+  feature_distillation_weight: 1.0
+
+  # 其他SAM2配置
+  memory_attention:
+    _target_: sam2.modeling.memory_attention.MemoryAttention
+    d_model: 256
+    pos_enc_at_input: true
+    layer:
+      _target_: sam2.modeling.memory_attention.MemoryAttentionLayer
+      activation: relu
+      dim_feedforward: 2048
+      dropout: 0.1
+      pos_enc_at_attn: false
+      self_attention:
+        _target_: sam2.modeling.sam.transformer.RoPEAttention
+        rope_theta: 10000.0
+        feat_sizes: [64, 64]
+        embedding_dim: 256
+        num_heads: 1
+        downsample_rate: 1
+        dropout: 0.1
+      d_model: 256
+      pos_enc_at_cross_attn_keys: true
+      pos_enc_at_cross_attn_queries: false
+      cross_attention:
+        _target_: sam2.modeling.sam.transformer.RoPEAttention
+        rope_theta: 10000.0
+        feat_sizes: [64, 64]
+        rope_k_repeat: True
+        embedding_dim: 256
+        num_heads: 1
+        downsample_rate: 1
+        dropout: 0.1
+        kv_in_dim: 64
+    num_layers: 4
+
+  memory_encoder:
+    _target_: sam2.modeling.memory_encoder.MemoryEncoder
+    out_dim: 64
+    position_encoding:
+      _target_: sam2.modeling.position_encoding.PositionEmbeddingSine
+      num_pos_feats: 64
+      normalize: true
+      scale: null
+      temperature: 10000
+    mask_downsampler:
+      _target_: sam2.modeling.memory_encoder.MaskDownSampler
+      kernel_size: 3
+      stride: 2
+      padding: 1
+    fuser:
+      _target_: sam2.modeling.memory_encoder.Fuser
+      layer:
+        _target_: sam2.modeling.memory_encoder.CXBlock
+        dim: 256
+        kernel_size: 7
+        padding: 3
+        layer_scale_init_value: 1e-6
+        use_dwconv: True
+      num_layers: 2
+
+  # SAM2基础配置
+  num_maskmem: 7
+  image_size: 1024
+  sigmoid_scale_for_mem_enc: 20.0
+  sigmoid_bias_for_mem_enc: -10.0
+  use_mask_input_as_output_without_sam: true
+  directly_add_no_mem_embed: true
+  use_high_res_features_in_sam: true
+  multimask_output_in_sam: true
+  iou_prediction_use_sigmoid: True
+  use_obj_ptrs_in_encoder: true
+  add_tpos_enc_to_obj_ptrs: false
+  only_obj_ptrs_in_the_past_for_eval: true
+  pred_obj_scores: true
+  pred_obj_scores_mlp: true
+  fixed_no_obj_ptr: true
+  multimask_output_for_tracking: true
+  use_multimask_token_for_obj_ptr: true
+  multimask_min_pt_num: 0
+  multimask_max_pt_num: 1
+  use_mlp_for_obj_ptr_proj: true
+  compile_image_encoder: False
+
+# 训练配置
+trainer:
+  _target_: training.trainer.Trainer
+  mode: train_only
+  max_epochs: 50
+  accelerator: cuda
+  seed_value: 123
+
+# 损失函数配置
+loss:
+  train:
+    _target_: training.loss_fns.MultiStepMultiMasksAndIous
+    weight_dict:
+      loss_mask: 1.0
+      loss_dice: 1.0
+      loss_iou: 1.0
+      loss_class: 0.0
+    focal_alpha: 0.25
+    focal_gamma: 2
+    supervise_all_iou: false
+    iou_use_l1_loss: false
+    pred_obj_scores: true
+    focal_gamma_obj_score: 0.0
+    focal_alpha_obj_score: -1
+
+# 优化器配置
+optim:
+  optimizer:
+    _target_: torch.optim.AdamW
+    lr: 1e-4
+    weight_decay: 0.01
+  options:
+    lr_scheduler:
+      _target_: torch.optim.lr_scheduler.CosineAnnealingLR
+      T_max: 50
+      eta_min: 1e-6
+  amp:
+    enabled: true
+    amp_dtype: float16
+
+# 数据配置
+data:
+  train:
+    _target_: training.dataset.video_dataset.VideoDataset
+    # 添加你的数据集配置
+
+# 日志配置
+logging:
+  log_dir: ./logs/sam2_distillation
+  log_freq: 100
+  tensorboard_writer:
+    _target_: torch.utils.tensorboard.SummaryWriter
+  log_level_primary: INFO
+  log_level_secondary: ERROR
+  log_scalar_frequency: 100
+  log_visual_frequency: 500
+
+# 检查点配置
+checkpoint:
+  save_dir: ./checkpoints/sam2_distillation
+  save_freq: 5
+  save_list: [10, 20, 30, 40, 50]
+  save_best_meters: ["val_loss"]
+
+# 分布式配置
+distributed:
+  find_unused_parameters: false
+  timeout_mins: 30
+
+# CUDA配置
+cuda:
+  cudnn_deterministic: false
+  cudnn_benchmark: true
+  allow_tf32: true 
